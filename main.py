@@ -1,57 +1,94 @@
 import os
-
-# The decky plugin module is located at decky-loader/plugin
-# For easy intellisense checkout the decky-loader code repo
-# and add the `decky-loader/plugin/imports` path to `python.analysis.extraPaths` in `.vscode/settings.json`
-import decky
-import asyncio
+import signal
+import subprocess
+import decky_plugin
 
 class Plugin:
-    # A normal method. It can be called from the TypeScript side using @decky/api.
-    async def add(self, left: int, right: int) -> int:
-        return left + right
+    # These are "fake" Windows processes created by Proton/Wine. 
+    # We must NEVER pause these, or the game environment breaks.
+    PROTON_SYSTEM_EXES = [
+        "explorer.exe", "services.exe", "winedevice.exe", 
+        "plugplay.exe", "svchost.exe", "rpcss.exe", 
+        "rundll32.exe", "wineboot.exe", "mscorsvw.exe",
+        "tabtip.exe", "conhost.exe", "crash_handler.exe"
+    ]
 
-    async def long_running(self):
-        await asyncio.sleep(15)
-        # Passing through a bunch of random data, just as an example
-        await decky.emit("timer_event", "Hello from the backend!", True, 2)
+    async def get_game_pid(self):
+        """
+        Finds the PID of a running .exe that is NOT a system process.
+        """
+        try:
+            # We list PID and the Command Name.
+            # We don't care about CPU usage anymore.
+            cmd = ["ps", "-eo", "pid,comm"]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            lines = result.stdout.splitlines()
+            
+            candidates = []
 
-    # Asyncio-compatible long-running code, executed in a task when the plugin is loaded
-    async def _main(self):
-        self.loop = asyncio.get_event_loop()
-        decky.logger.info("Hello World!")
+            for line in lines[1:]:
+                parts = line.strip().split(maxsplit=1)
+                if len(parts) < 2: continue
+                
+                pid_str, name = parts
+                name_lower = name.lower()
 
-    # Function called first during the unload process, utilize this to handle your plugin being stopped, but not
-    # completely removed
-    async def _unload(self):
-        decky.logger.info("Goodnight World!")
-        pass
+                # 1. MUST end in .exe
+                if not name_lower.endswith(".exe"):
+                    continue
 
-    # Function called after `_unload` during uninstall, utilize this to clean up processes and other remnants of your
-    # plugin that may remain on the system
-    async def _uninstall(self):
-        decky.logger.info("Goodbye World!")
-        pass
+                # 2. MUST NOT be a known Proton system file
+                if name_lower in self.PROTON_SYSTEM_EXES:
+                    continue
+                
+                # If it passed both, it's a user game executable.
+                candidates.append((int(pid_str), name))
 
-    async def start_timer(self):
-        self.loop.create_task(self.long_running())
+            # Logic: If we found candidates, usually the LAST one launched 
+            # or the one with the highest PID is the actual game 
+            # (since launchers usually spawn the game process later).
+            # For safety, let's grab the one with the highest PID.
+            if candidates:
+                candidates.sort(key=lambda x: x[0], reverse=True) # Sort by PID descending
+                target_pid, target_name = candidates[0]
+                decky_plugin.logger.info(f"Targeting Game: {target_name} (PID: {target_pid})")
+                return target_pid
+                
+            return None
 
-    # Migrations that should be performed before entering `_main()`.
-    async def _migration(self):
-        decky.logger.info("Migrating")
-        # Here's a migration example for logs:
-        # - `~/.config/decky-template/template.log` will be migrated to `decky.decky_LOG_DIR/template.log`
-        decky.migrate_logs(os.path.join(decky.DECKY_USER_HOME,
-                                               ".config", "decky-template", "template.log"))
-        # Here's a migration example for settings:
-        # - `~/homebrew/settings/template.json` is migrated to `decky.decky_SETTINGS_DIR/template.json`
-        # - `~/.config/decky-template/` all files and directories under this root are migrated to `decky.decky_SETTINGS_DIR/`
-        decky.migrate_settings(
-            os.path.join(decky.DECKY_HOME, "settings", "template.json"),
-            os.path.join(decky.DECKY_USER_HOME, ".config", "decky-template"))
-        # Here's a migration example for runtime data:
-        # - `~/homebrew/template/` all files and directories under this root are migrated to `decky.decky_RUNTIME_DIR/`
-        # - `~/.local/share/decky-template/` all files and directories under this root are migrated to `decky.decky_RUNTIME_DIR/`
-        decky.migrate_runtime(
-            os.path.join(decky.DECKY_HOME, "template"),
-            os.path.join(decky.DECKY_USER_HOME, ".local", "share", "decky-template"))
+        except Exception as e:
+            decky_plugin.logger.error(f"Error finding exe: {e}")
+            return None
+
+    async def pause_game(self):
+        pid = await self.get_game_pid()
+        if pid:
+            try:
+                os.kill(pid, signal.SIGSTOP) # Signal 19
+                return True
+            except ProcessLookupError:
+                return False
+        return False
+
+    async def resume_game(self):
+        # To resume, we look for PAUSED (State: T) processes that match our .exe filter
+        cmd = ["ps", "-eo", "pid,state,comm"] 
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        for line in result.stdout.splitlines():
+             parts = line.strip().split()
+             if len(parts) < 3: continue
+             
+             pid, state, name = parts[0], parts[1], parts[2]
+             name_lower = name.lower()
+
+             # Criteria: Ends in .exe, is Paused (T), is not Proton System
+             if (state == 'T' and 
+                 name_lower.endswith(".exe") and 
+                 name_lower not in self.PROTON_SYSTEM_EXES):
+                 
+                 os.kill(int(pid), signal.SIGCONT) # Signal 18
+                 return True
+                 
+        return False
