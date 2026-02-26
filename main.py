@@ -4,91 +4,75 @@ import subprocess
 import decky_plugin
 
 class Plugin:
-    # These are "fake" Windows processes created by Proton/Wine. 
-    # We must NEVER pause these, or the game environment breaks.
+    # 1. System processes to IGNORE (Never pause these)
     PROTON_SYSTEM_EXES = [
         "explorer.exe", "services.exe", "winedevice.exe", 
         "plugplay.exe", "svchost.exe", "rpcss.exe", 
-        "rundll32.exe", "wineboot.exe", "mscorsvw.exe",
-        "tabtip.exe", "conhost.exe", "crash_handler.exe"
+        "rundll32.exe", "wineboot.exe", "mscorsvw.exe"
     ]
 
-    async def get_game_pid(self):
+    # 2. Linux Native Emulators to INCLUDE (Add names here if needed)
+    LINUX_EMULATORS = [
+        "yuzu", "ryujinx", "dolphin-emu", "retroarch", "pcsx2-qt", "citra-qt"
+    ]
+
+    async def get_target_process(self):
         """
-        Finds the PID of a running .exe that is NOT a system process.
+        Returns a tuple: (pid, state, name)
+        State is usually 'R' (Running), 'S' (Sleeping), or 'T' (Stopped/Paused)
         """
         try:
-            # We list PID and the Command Name.
-            # We don't care about CPU usage anymore.
-            cmd = ["ps", "-eo", "pid,comm"]
+            # Get PID, State, and Command Name for all processes
+            cmd = ["ps", "-eo", "pid,state,comm"]
             result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            lines = result.stdout.splitlines()
             
             candidates = []
 
-            for line in lines[1:]:
-                parts = line.strip().split(maxsplit=1)
-                if len(parts) < 2: continue
+            for line in result.stdout.splitlines():
+                parts = line.strip().split()
+                if len(parts) < 3: continue
                 
-                pid_str, name = parts
+                pid, state, name = parts[0], parts[1], parts[2]
                 name_lower = name.lower()
 
-                # 1. MUST end in .exe
-                if not name_lower.endswith(".exe"):
-                    continue
+                # CHECK 1: Is it a Windows Game? (.exe)
+                is_windows_game = (name_lower.endswith(".exe") and 
+                                   name_lower not in self.PROTON_SYSTEM_EXES)
 
-                # 2. MUST NOT be a known Proton system file
-                if name_lower in self.PROTON_SYSTEM_EXES:
-                    continue
-                
-                # If it passed both, it's a user game executable.
-                candidates.append((int(pid_str), name))
+                # CHECK 2: Is it a Linux Emulator?
+                is_linux_emu = any(emu in name_lower for emu in self.LINUX_EMULATORS)
 
-            # Logic: If we found candidates, usually the LAST one launched 
-            # or the one with the highest PID is the actual game 
-            # (since launchers usually spawn the game process later).
-            # For safety, let's grab the one with the highest PID.
+                if is_windows_game or is_linux_emu:
+                    candidates.append((int(pid), state, name))
+
+            # If we found multiple candidates, pick the one with the highest PID
+            # (Usually the most recently launched game)
             if candidates:
-                candidates.sort(key=lambda x: x[0], reverse=True) # Sort by PID descending
-                target_pid, target_name = candidates[0]
-                decky_plugin.logger.info(f"Targeting Game: {target_name} (PID: {target_pid})")
-                return target_pid
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                return candidates[0] # Returns (pid, state, name)
                 
             return None
 
         except Exception as e:
-            decky_plugin.logger.error(f"Error finding exe: {e}")
+            decky_plugin.logger.error(f"Error finding process: {e}")
             return None
 
-    async def pause_game(self):
-        pid = await self.get_game_pid()
-        if pid:
-            try:
-                os.kill(pid, signal.SIGSTOP) # Signal 19
-                return True
-            except ProcessLookupError:
-                return False
-        return False
-
-    async def resume_game(self):
-        # To resume, we look for PAUSED (State: T) processes that match our .exe filter
-        cmd = ["ps", "-eo", "pid,state,comm"] 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+    async def toggle_game(self):
+        target = await self.get_target_process()
         
-        for line in result.stdout.splitlines():
-             parts = line.strip().split()
-             if len(parts) < 3: continue
-             
-             pid, state, name = parts[0], parts[1], parts[2]
-             name_lower = name.lower()
-
-             # Criteria: Ends in .exe, is Paused (T), is not Proton System
-             if (state == 'T' and 
-                 name_lower.endswith(".exe") and 
-                 name_lower not in self.PROTON_SYSTEM_EXES):
-                 
-                 os.kill(int(pid), signal.SIGCONT) # Signal 18
-                 return True
-                 
+        if target:
+            pid, state, name = target
+            
+            # If state is 'T', the process is currently PAUSED. We must RESUME it.
+            if state == 'T':
+                os.kill(pid, signal.SIGCONT) # Signal 18 = Continue
+                decky_plugin.logger.info(f"Resumed {name} (PID: {pid})")
+                return True
+            
+            # Otherwise (R, S, D), the process is RUNNING. We must PAUSE it.
+            else:
+                os.kill(pid, signal.SIGSTOP) # Signal 19 = Stop
+                decky_plugin.logger.info(f"Paused {name} (PID: {pid})")
+                return True
+                
         return False
