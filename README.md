@@ -2,6 +2,8 @@
 
 A [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin that forces **any** game on the Steam Deck to pause, even if the game itself doesn't allow it.
 
+🔴 **WARNING:** Not compatible with native games yet. Only works with games running through Proton.
+
 ![Pause Badge](https://img.shields.io/badge/Status-Working-brightgreen) ![Platform](https://img.shields.io/badge/Platform-Steam_Deck-blue)
 
 ## 🛑 The Problem
