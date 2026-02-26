@@ -21,7 +21,6 @@ This plugin uses a robust **"Process Hunter"** method:
 It works on:
 * **Steam Games** (Elden Ring, God of War, etc.)
 * **Non-Steam Games** (Launchers like Heroic, Lutris)
-* **Emulators** (Yuzu, Ryujinx, Dolphin, PCSX2, RetroArch)
 
 ---
 
